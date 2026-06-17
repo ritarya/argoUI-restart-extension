@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-server
+  namespace: argocd
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: rfc-extension-installer
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - mkdir -p /tmp/extensions/rfc && cp /extensions/extension.js /tmp/extensions/rfc/extension.js
+          volumeMounts:
+            - name: rfc-extension-src
+              mountPath: /extensions
+              readOnly: true
+            - name: rfc-extensions
+              mountPath: /tmp/extensions
+      containers:
+        - name: argocd-server
+          args:
+            - /usr/local/bin/argocd-server
+            - --enable-proxy-extension
+          volumeMounts:
+            - name: rfc-extensions
+              mountPath: /tmp/extensions
+      volumes:
+        - name: rfc-extension-src
+          configMap:
+            name: argocd-rfc-extension
+        - name: rfc-extensions
+          emptyDir: {}

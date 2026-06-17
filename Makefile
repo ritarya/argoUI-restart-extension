@@ -63,7 +63,7 @@ type-check: ## TypeScript type-check the UI extension
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 .PHONY: deploy deploy-secrets deploy-redis deploy-middleware \
-        deploy-ui patch-argocd-cm restart-argocd-server
+        deploy-ui patch-argocd-cm patch-argocd-server restart-argocd-server
 
 deploy: ## Full deploy in dependency order (runs all deploy-* targets in sequence)
 	$(MAKE) deploy-secrets
@@ -71,6 +71,7 @@ deploy: ## Full deploy in dependency order (runs all deploy-* targets in sequenc
 	$(MAKE) deploy-middleware
 	$(MAKE) deploy-ui
 	$(MAKE) patch-argocd-cm
+	$(MAKE) patch-argocd-server
 	$(MAKE) restart-argocd-server
 	@echo ""
 	@echo "Deployment complete. Run 'make verify' to check component health."
@@ -96,6 +97,10 @@ deploy-ui: build-ui ## Build the React bundle and load it into the argocd-rfc-ex
 		--dry-run=client -o yaml | $(KUBECTL) apply -f -
 	$(KUBECTL) label configmap argocd-rfc-extension \
 		-n $(NAMESPACE) app.kubernetes.io/name=argocd-rfc-extension --overwrite
+
+patch-argocd-server: ## Patch argocd-server Deployment: add init container + --enable-proxy-extension
+	$(KUBECTL) patch deployment argocd-server -n $(NAMESPACE) \
+		--patch-file argocd-extension/manifests/argocd-server-patch.yaml
 
 patch-argocd-cm: ## Patch argocd-cm with Lua action + proxy extension config
 	$(KUBECTL) patch configmap argocd-cm -n $(NAMESPACE) \
