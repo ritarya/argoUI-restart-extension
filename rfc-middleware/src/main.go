@@ -23,8 +23,12 @@ func main() {
 
 	client, err := newITSMClient(
 		os.Getenv("ITSM_BASE_URL"),
-		os.Getenv("ITSM_TLS_CERT_PATH"),
-		os.Getenv("ITSM_TLS_KEY_PATH"),
+		os.Getenv("ITSM_TOKEN_URL"),
+		os.Getenv("ITSM_CLIENT_ID"),
+		os.Getenv("ITSM_CLIENT_SECRET"),
+		os.Getenv("ITSM_USERNAME"),
+		os.Getenv("ITSM_PASSWORD"),
+		os.Getenv("ITSM_SCOPE"),
 	)
 	if err != nil {
 		logger.Error("failed to create ITSM client", "err", err)

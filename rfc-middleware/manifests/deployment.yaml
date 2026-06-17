@@ -27,20 +27,44 @@ spec:
                 secretKeyRef:
                   name: rfc-middleware-config
                   key: itsm_base_url
-            - name: ITSM_TLS_CERT_PATH
-              value: /etc/itsm-tls/tls.crt
-            - name: ITSM_TLS_KEY_PATH
-              value: /etc/itsm-tls/tls.key
+            - name: ITSM_TOKEN_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rfc-middleware-config
+                  key: itsm_token_url
+                  optional: true   # defaults to {ITSM_BASE_URL}/oauth_token.do when absent
+            - name: ITSM_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: rfc-middleware-itsm-credentials
+                  key: client_id
+            - name: ITSM_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: rfc-middleware-itsm-credentials
+                  key: client_secret
+            - name: ITSM_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: rfc-middleware-itsm-credentials
+                  key: username
+            - name: ITSM_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rfc-middleware-itsm-credentials
+                  key: password
+            - name: ITSM_SCOPE
+              valueFrom:
+                secretKeyRef:
+                  name: rfc-middleware-config
+                  key: itsm_scope
+                  optional: true   # defaults to "openid" when absent
             - name: REDIS_ADDR
               value: redis.argocd.svc.cluster.local:6379
             - name: REDIS_TTL_SECONDS
               value: "60"
             - name: LOG_LEVEL
               value: info
-          volumeMounts:
-            - name: itsm-tls
-              mountPath: /etc/itsm-tls
-              readOnly: true
           resources:
             requests:
               cpu: 50m
@@ -60,10 +84,6 @@ spec:
               port: 8080
             initialDelaySeconds: 3
             periodSeconds: 5
-      volumes:
-        - name: itsm-tls
-          secret:
-            secretName: rfc-middleware-itsm-tls
 ---
 apiVersion: v1
 kind: Service
