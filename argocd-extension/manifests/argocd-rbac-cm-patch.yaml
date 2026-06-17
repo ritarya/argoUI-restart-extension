@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+data:
+  policy.default: role:readonly
+
+  policy.csv: |
+    # ── Admin ────────────────────────────────────────────────────────────────
+    # Explicit extensions grant — ArgoCD v3 does not include this in the
+    # built-in role:admin policy even though * wildcards cover other resources.
+    p, role:admin, extensions, invoke, *, allow
+    g, admin, role:admin
+
+    # ── RFC-gated restart role ────────────────────────────────────────────────
+    # Grants the minimum permissions to drive the full RFC validation flow:
+    #   1. view applications and their resources
+    #   2. invoke the two RFC Lua actions on Deployments
+    #   3. call the rfc-validator proxy extension to validate the RFC number
+    #
+    # Does NOT grant:
+    #   - the built-in "restart" action (uncontrolled restart, bypasses RFC gate)
+    #   - sync, delete, or any other mutation
+    p, role:rfc-restarter, applications, get,    */*, allow
+    p, role:rfc-restarter, applications, action/apps/Deployment/restart (RFC required), */*, allow
+    p, role:rfc-restarter, applications, action/apps/Deployment/restart (RFC approved), */*, allow
+    p, role:rfc-restarter, extensions,   invoke, rfc-validator, allow
+
+    # ── Local user bindings ───────────────────────────────────────────────────
+    # Add one line per local ArgoCD user that should be able to use the RFC flow.
+    # g, <username>, role:rfc-restarter
+    # g, jane.doe,   role:rfc-restarter
+
+    # ── SSO / OIDC group bindings ─────────────────────────────────────────────
+    # Map corporate OIDC/SAML groups to the role.  The group name must match
+    # exactly what the IdP sends in the groups claim (or SAML attribute).
+    # g, corp-platform-engineers, role:rfc-restarter
+    # g, corp-developers,         role:rfc-restarter

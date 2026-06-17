@@ -1,0 +1,27 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: argocd-rfc-webhook
+  annotations:
+    # cert-manager injects the CA bundle automatically
+    cert-manager.io/inject-ca-from: argocd/argocd-rfc-webhook-cert
+webhooks:
+  - name: rfc-validator.argocd.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        operations: ["DELETE"]
+    # Limit to namespaces labelled for RFC enforcement
+    namespaceSelector:
+      matchLabels:
+        argocd-rfc-enforcement: "enabled"
+    clientConfig:
+      service:
+        name: argocd-rfc-webhook
+        namespace: argocd
+        path: /validate
+      caBundle: ""  # injected by cert-manager annotation above

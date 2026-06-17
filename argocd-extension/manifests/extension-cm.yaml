@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rfc-extension
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-rfc-extension
+data:
+  # Populated by CI: `kubectl create configmap argocd-rfc-extension
+  #   --from-file=extension.js=argocd-extension/ui/dist/extension.js
+  #   --dry-run=client -o yaml | kubectl apply -f -`
+  extension.js: |
+    /* placeholder — replace with contents of argocd-extension/ui/dist/extension.js after build */

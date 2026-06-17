@@ -1,0 +1,65 @@
+---
+# Nginx that serves a static "approved" response for any POST to /validate.
+# Replace validate.json content to test the rejected/error paths.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mock-rfc-responses
+  namespace: argocd
+data:
+  default.conf: |
+    server {
+      listen 8080;
+
+      location /validate {
+        add_header Content-Type application/json;
+        return 200 '{"approved":true,"rfc_title":"CHG0099999 — Local test RFC","approver":"jane.doe@corp.com","window_start":"2026-01-01T00:00:00Z","window_end":"2099-12-31T23:59:59Z","reason":""}';
+      }
+
+      location /healthz {
+        return 200 'ok';
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-rfc-validator
+  namespace: argocd
+  labels:
+    app: mock-rfc-validator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-rfc-validator
+  template:
+    metadata:
+      labels:
+        app: mock-rfc-validator
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/conf.d/
+      volumes:
+        - name: config
+          configMap:
+            name: mock-rfc-responses
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rfc-validator
+  namespace: argocd
+spec:
+  selector:
+    app: mock-rfc-validator
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP

@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  # Requires --enable-proxy-extension on argocd-server (ArgoCD v2.7+)
+  extension.config: |
+    extensions:
+      - name: rfc-validator
+        backend:
+          services:
+            - url: http://rfc-validator.argocd.svc.cluster.local:8080
+
+  # Custom resource actions for apps/Deployment.
+  # os.* is not available in ArgoCD's Lua sandbox — no timestamp generation here.
+  # The React tab sets restartedAt when the engineer confirms the restart.
+  # Only restart (RFC required) needs a custom Lua definition; the built-in
+  # restart action is kept in discovery.lua so ArgoCD uses its Go implementation.
+  resource.customizations.actions.apps_Deployment: |
+    discovery.lua: |
+      actions = {}
+      actions["restart (RFC required)"] = { ["disabled"] = false }
+      actions["restart"] = { ["disabled"] = false }
+      return actions
+    definitions:
+    - name: restart (RFC required)
+      action.lua: |
+        if obj.metadata.annotations == nil then
+          obj.metadata.annotations = {}
+        end
+        obj.metadata.annotations["rfc-validation/status"] = "pending"
+        return obj
+    - name: restart (RFC approved)
+      action.lua: |
+        -- Triggered by the React tab after RFC is validated.
+        -- rfc-id and approver are written to metadata annotations by the tab
+        -- before invoking this action via RunResourceAction.
+        -- os.* is unavailable in the Lua sandbox; resourceVersion is a
+        -- guaranteed-changing value that still triggers a rolling restart.
+        if obj.metadata.annotations == nil then
+          obj.metadata.annotations = {}
+        end
+        obj.metadata.annotations["rfc-validation/status"] = "approved"
+        if obj.spec.template.metadata == nil then
+          obj.spec.template.metadata = {}
+        end
+        if obj.spec.template.metadata.annotations == nil then
+          obj.spec.template.metadata.annotations = {}
+        end
+        obj.spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"] =
+          "rfc-" .. (obj.metadata.resourceVersion or "0")
+        return obj

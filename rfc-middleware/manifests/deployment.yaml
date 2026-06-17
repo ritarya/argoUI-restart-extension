@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rfc-validator
+  namespace: argocd
+  labels:
+    app: rfc-validator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rfc-validator
+  template:
+    metadata:
+      labels:
+        app: rfc-validator
+    spec:
+      serviceAccountName: rfc-validator
+      containers:
+        - name: rfc-validator
+          image: your-registry/rfc-validator:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ITSM_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rfc-middleware-config
+                  key: itsm_base_url
+            - name: ITSM_TLS_CERT_PATH
+              value: /etc/itsm-tls/tls.crt
+            - name: ITSM_TLS_KEY_PATH
+              value: /etc/itsm-tls/tls.key
+            - name: REDIS_ADDR
+              value: redis.argocd.svc.cluster.local:6379
+            - name: REDIS_TTL_SECONDS
+              value: "60"
+            - name: LOG_LEVEL
+              value: info
+          volumeMounts:
+            - name: itsm-tls
+              mountPath: /etc/itsm-tls
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: itsm-tls
+          secret:
+            secretName: rfc-middleware-itsm-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rfc-validator
+  namespace: argocd
+spec:
+  selector:
+    app: rfc-validator
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rfc-validator
+  namespace: argocd
