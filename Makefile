@@ -2,7 +2,6 @@
 REGISTRY        ?= your-registry
 TAG             ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo latest)
 NAMESPACE       ?= argocd
-APP_NAMESPACE   ?= # target app namespace(s) to label for webhook enforcement
 
 RFC_IMAGE       := $(REGISTRY)/rfc-validator:$(TAG)
 
@@ -27,7 +26,6 @@ help:
 	@echo "    REGISTRY=$(REGISTRY)"
 	@echo "    TAG=$(TAG)"
 	@echo "    NAMESPACE=$(NAMESPACE)"
-	@echo "    APP_NAMESPACE=$(APP_NAMESPACE)"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 .PHONY: build build-middleware build-ui
@@ -65,8 +63,7 @@ type-check: ## TypeScript type-check the UI extension
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 .PHONY: deploy deploy-secrets deploy-redis deploy-middleware \
-        deploy-ui patch-argocd-cm \
-        label-namespace restart-argocd-server
+        deploy-ui patch-argocd-cm restart-argocd-server
 
 deploy: ## Full deploy in dependency order (runs all deploy-* targets in sequence)
 	$(MAKE) deploy-secrets
@@ -77,13 +74,6 @@ deploy: ## Full deploy in dependency order (runs all deploy-* targets in sequenc
 	$(MAKE) restart-argocd-server
 	@echo ""
 	@echo "Deployment complete. Run 'make verify' to check component health."
-	@if [ -z "$(APP_NAMESPACE)" ]; then \
-		echo ""; \
-		echo "  Next step: label app namespaces for RBAC enforcement:"; \
-		echo "    make label-namespace APP_NAMESPACE=<your-app-ns>"; \
-	else \
-		$(MAKE) label-namespace; \
-	fi
 
 deploy-secrets: ## Apply ITSM credentials secret (or ESO ref)
 	$(KUBECTL) apply -f rfc-middleware/manifests/secret.yaml
@@ -99,8 +89,13 @@ deploy-middleware: ## Deploy RFC middleware + NetworkPolicy
 	$(KUBECTL) set image deployment/rfc-validator \
 		rfc-validator=$(RFC_IMAGE) -n $(NAMESPACE)
 
-deploy-ui: ## Apply the React extension ConfigMap (argocd-rfc-extension)
-	$(KUBECTL) apply -f argocd-extension/manifests/extension-cm.yaml
+deploy-ui: build-ui ## Build the React bundle and load it into the argocd-rfc-extension ConfigMap
+	$(KUBECTL) create configmap argocd-rfc-extension \
+		-n $(NAMESPACE) \
+		--from-file=extension.js=argocd-extension/ui/dist/extension.js \
+		--dry-run=client -o yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) label configmap argocd-rfc-extension \
+		-n $(NAMESPACE) app.kubernetes.io/name=argocd-rfc-extension --overwrite
 
 patch-argocd-cm: ## Patch argocd-cm with Lua action + proxy extension config
 	$(KUBECTL) patch configmap argocd-cm -n $(NAMESPACE) \
@@ -110,13 +105,6 @@ patch-argocd-cm: ## Patch argocd-cm with Lua action + proxy extension config
 restart-argocd-server: ## Rollout-restart argocd-server to load extension.js and argocd-cm changes
 	$(KUBECTL) rollout restart deployment argocd-server -n $(NAMESPACE)
 	$(KUBECTL) rollout status deployment argocd-server -n $(NAMESPACE) --timeout=120s
-
-label-namespace: ## Label APP_NAMESPACE to enable ArgoCD RFC enforcement (APP_NAMESPACE=<ns> required)
-	@if [ -z "$(APP_NAMESPACE)" ]; then \
-		echo "Error: APP_NAMESPACE is required. Usage: make label-namespace APP_NAMESPACE=<ns>"; \
-		exit 1; \
-	fi
-	$(KUBECTL) label namespace $(APP_NAMESPACE) argocd-rfc-enforcement=enabled --overwrite
 
 # ── Update image only (no manifest re-apply) ──────────────────────────────────
 .PHONY: update
@@ -161,7 +149,7 @@ undeploy: ## Remove all deployed resources (does NOT revert the argocd-cm patch)
 
 # ── Minikube ──────────────────────────────────────────────────────────────────
 # Builds images directly inside minikube's Docker daemon (no registry or push needed).
-# Usage: make minikube-deploy [TAG=dev] [APP_NAMESPACE=<ns>]
+# Usage: make minikube-deploy [TAG=dev]
 MINIKUBE_TAG ?= dev
 
 .PHONY: minikube-deploy minikube-build minikube-load
