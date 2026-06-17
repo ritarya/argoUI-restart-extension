@@ -12,6 +12,12 @@ DOCKER          := docker
 
 .DEFAULT_GOAL := help
 
+# ── All-in-one ────────────────────────────────────────────────────────────────
+.PHONY: all
+all: build push deploy ## Build images + UI, push to registry, and deploy everything
+	@echo ""
+	@echo "All done. Run 'make verify' to confirm all components are healthy."
+
 # ── Help ─────────────────────────────────────────────────────────────────────
 .PHONY: help
 help:
@@ -190,6 +196,39 @@ undeploy: ## Remove all deployed resources (does NOT delete the argocd-cm patch)
 	@echo ""
 	@echo "Resources removed. The argocd-cm patch (Lua action + proxy config) was NOT"
 	@echo "reverted — patch argocd-cm manually and restart argocd-server if needed."
+
+# ── Minikube ──────────────────────────────────────────────────────────────────
+# Builds images directly inside minikube's Docker daemon (no registry or push needed).
+# Usage: make minikube-deploy [TAG=dev] [APP_NAMESPACE=<ns>]
+MINIKUBE_TAG ?= dev
+
+.PHONY: minikube-deploy minikube-build minikube-load
+
+minikube-deploy: minikube-build deploy ## Build into minikube and deploy everything (no registry needed)
+	@echo ""
+	@echo "Minikube deploy complete. Run 'make verify' to confirm component health."
+
+minikube-build: ## Build both Docker images directly inside minikube's daemon
+	@echo "Switching docker context to minikube..."
+	$(eval export DOCKER_TLS_VERIFY=$(shell minikube docker-env | grep DOCKER_TLS_VERIFY | cut -d= -f2 | tr -d '"'))
+	$(eval export DOCKER_HOST=$(shell minikube docker-env | grep DOCKER_HOST | cut -d= -f2 | tr -d '"'))
+	$(eval export DOCKER_CERT_PATH=$(shell minikube docker-env | grep DOCKER_CERT_PATH | cut -d= -f2 | tr -d '"'))
+	$(eval export MINIKUBE_ACTIVE_DOCKERD=$(shell minikube docker-env | grep MINIKUBE_ACTIVE_DOCKERD | cut -d= -f2 | tr -d '"'))
+	DOCKER_TLS_VERIFY=$(DOCKER_TLS_VERIFY) DOCKER_HOST=$(DOCKER_HOST) DOCKER_CERT_PATH=$(DOCKER_CERT_PATH) \
+		$(DOCKER) build -t $(REGISTRY)/rfc-validator:$(MINIKUBE_TAG) rfc-middleware/
+	DOCKER_TLS_VERIFY=$(DOCKER_TLS_VERIFY) DOCKER_HOST=$(DOCKER_HOST) DOCKER_CERT_PATH=$(DOCKER_CERT_PATH) \
+		$(DOCKER) build -t $(REGISTRY)/argocd-rfc-webhook:$(MINIKUBE_TAG) admission-webhook/
+	@echo "Images built inside minikube — no push needed."
+	@echo "Setting imagePullPolicy: Never on deployments..."
+	-$(KUBECTL) patch deployment rfc-validator -n $(NAMESPACE) \
+		-p '{"spec":{"template":{"spec":{"containers":[{"name":"rfc-validator","imagePullPolicy":"Never"}]}}}}'
+	-$(KUBECTL) patch deployment argocd-rfc-webhook -n $(NAMESPACE) \
+		-p '{"spec":{"template":{"spec":{"containers":[{"name":"webhook","imagePullPolicy":"Never"}]}}}}'
+
+minikube-load: build ## Build with local docker then load images into minikube (alternative to minikube-build)
+	minikube image load $(REGISTRY)/rfc-validator:$(TAG)
+	minikube image load $(REGISTRY)/argocd-rfc-webhook:$(TAG)
+	@echo "Images loaded into minikube."
 
 # ── Local dev ─────────────────────────────────────────────────────────────────
 .PHONY: dev-ui dev-middleware dev-setup
