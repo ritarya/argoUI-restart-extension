@@ -12,29 +12,97 @@
 
 ## 1. Context and Problem Statement
 
-The platform engineering team operates multiple production workloads on an AWS EKS cluster
-managed via ArgoCD. Engineers have direct access to the ArgoCD UI to perform operational
-tasks including pod restarts on running Deployments. Pod restarts in production environments
-are classified as changes under the organisation's ITSM Change Management process and
-require a pre-approved Request for Change (RFC) before execution.
+### 1.1 Who this affects
 
-Currently, there is no enforcement mechanism between the ArgoCD UI and the on-premises ITSM
-system (ServiceNow / Jira Service Management). Engineers can trigger pod restarts from the
-ArgoCD UI or directly via `kubectl` without referencing or validating an approved RFC. This
-creates the following risks:
+Application developers own and operate services deployed on an AWS EKS cluster. Their
+applications are managed through ArgoCD, which they use daily to monitor deployment health,
+inspect resource state, and observe rolling updates. Developers are responsible for the
+operational health of their own services — including responding to degraded pods, memory
+leaks, or stuck processes that require a pod restart to recover.
 
-- **Compliance violations** — production changes executed outside the approved change window
-  or without a valid RFC breach the organisation's ITIL-aligned change management policy.
-- **Audit gaps** — there is no automated record linking a pod restart event to an RFC,
-  making post-incident reviews and compliance audits manual and error-prone.
-- **Dual enforcement gap** — even if a UI-level control is added, engineers with `kubectl`
-  access can bypass it entirely.
-- **Operational risk** — uncoordinated restarts during peak hours or outside change windows
-  increase the risk of unplanned service disruption.
+Developers are not platform or infrastructure engineers. They do not have deep Kubernetes
+expertise, and they should not need it for a routine operational task like restarting a pod.
 
-The problem is therefore: **how do we enforce RFC validation as a prerequisite for pod
-restarts initiated from the ArgoCD UI, while also blocking direct `kubectl` bypass, without
-disrupting the existing ArgoCD release cycle or requiring a custom ArgoCD build?**
+### 1.2 The current developer experience problem
+
+Today, when an application developer needs to restart a pod — for example, to clear a
+memory leak, recover from a deadlock, or apply a configuration reload — the process is:
+
+1. **Raise an RFC** in the organisation's ITSM system (ServiceNow / Jira Service
+   Management) and wait for change approval, which can take minutes to hours depending on
+   the change window and approver availability.
+2. **Request jumphost access** or locate existing credentials to reach a bastion host that
+   has network access to the EKS cluster.
+3. **Log into the jumphost** via SSH or a VPN-gated remote session — often requiring MFA,
+   a corporate VPN, and a session token that may have a short expiry.
+4. **Locate the correct `kubeconfig`** context for the target cluster and namespace, which
+   may differ across environments (dev, staging, production).
+5. **Execute `kubectl` commands** to identify the correct pod name and trigger the restart:
+   ```bash
+   kubectl get pods -n <namespace>
+   kubectl delete pod <pod-name> -n <namespace>
+   # or
+   kubectl rollout restart deployment/<deployment-name> -n <namespace>
+   ```
+6. **Monitor the restart** manually by polling `kubectl get pods` — with no visual feedback
+   on rollout progress, health checks, or whether the new pod came up successfully.
+
+This flow has several compounding problems from a developer experience (DX) standpoint:
+
+- **High friction for a routine task** — a pod restart, which takes seconds to execute,
+  requires navigating multiple systems (ITSM, VPN, jumphost, CLI) before a single command
+  can be run. The total elapsed time from decision to action can exceed 15–30 minutes.
+- **Context switching overhead** — developers must leave the ArgoCD UI (where they already
+  have full visibility of their application's health) to perform the restart in a completely
+  separate environment, then return to ArgoCD to observe the outcome.
+- **Jumphost as a bottleneck** — jumphost sessions are shared infrastructure. Access may
+  be limited by concurrent session caps, stale credentials, or network path issues that
+  are unrelated to the developer's actual task.
+- **Error-prone CLI operations** — developers unfamiliar with `kubectl` syntax may
+  accidentally target the wrong namespace, delete the wrong pod, or omit the rolling
+  restart flag — causing unintended disruption. There is no confirmation prompt or
+  pre-flight validation in the raw CLI.
+- **No RFC linkage at execution time** — the approved RFC exists in the ITSM system, but
+  nothing connects it to the `kubectl` command that was actually run. If an incident occurs,
+  auditors must manually correlate timestamps and usernames across three systems (ITSM,
+  jumphost session log, Kubernetes audit log) to reconstruct what happened.
+- **Knowledge barrier** — junior developers or developers new to the team may not know the
+  correct jumphost hostname, the kubeconfig location, or the namespace naming convention,
+  creating a dependency on senior engineers or the platform team for a task that should be
+  self-serviceable.
+
+### 1.3 The opportunity: ArgoCD UI as the operational interface
+
+Developers already have the ArgoCD UI open when they observe a pod issue. ArgoCD displays
+the exact Deployment, its replica set, the failing pod, its logs, and its health status —
+all in one place. It is the natural and correct place for a developer to initiate a pod
+restart, without any context switch.
+
+The platform team is introducing a **pod restart capability directly in the ArgoCD UI** —
+surfaced as a right-click action on Deployment resources — so that developers can restart
+pods from the same interface where they diagnose the problem. This eliminates the jumphost
+dependency entirely for this use case and reduces the time from decision to action from
+15–30 minutes to under 60 seconds.
+
+### 1.4 The compliance constraint that shapes the solution
+
+Pod restarts in production namespaces are classified as Standard Changes under the
+organisation's ITIL-aligned Change Management policy. Before any pod restart is performed
+in production, an approved RFC must exist in the ITSM system (ServiceNow / Jira SM)
+covering the change, including a valid change window that encompasses the time of execution.
+
+This requirement does not go away because the restart is initiated from a UI instead of a
+CLI. The platform team must therefore ensure that:
+
+- The RFC is validated against the ITSM system **before** the restart is permitted.
+- The validated RFC ID is **recorded alongside the restart event** for audit purposes.
+- The control cannot be **bypassed** by developers who still have jumphost access, CI
+  pipeline service accounts, or any other `kubectl`-capable client.
+
+The problem is therefore: **how do we deliver a self-service pod restart experience in the
+ArgoCD UI that eliminates the jumphost dependency for developers, while enforcing RFC
+validation inline in the same workflow — and blocking bypass paths — without requiring a
+custom ArgoCD build or coupling the extension to ArgoCD's upgrade cycle?**
 
 ---
 
@@ -42,17 +110,19 @@ disrupting the existing ArgoCD release cycle or requiring a custom ArgoCD build?
 
 - **Compliance** — Every pod restart in a production namespace must be traceable to an
   approved RFC in the ITSM system. This is a non-negotiable audit requirement.
-- **Enforcement depth** — The control must not be bypassable via direct `kubectl` access.
-  UI-only gates are insufficient for engineers with cluster credentials.
+- **Developer experience** — The solution must eliminate the jumphost dependency entirely.
+  RFC validation must be inline in the ArgoCD UI, not an out-of-band step in a separate
+  tool or terminal session.
 - **Operational velocity** — The solution must not introduce excessive friction for
-  legitimate, pre-approved changes. Validation should complete in seconds.
+  legitimate, pre-approved changes. Validation should complete in seconds, not minutes.
 - **ArgoCD upgrade independence** — The extension must have its own release cycle and must
   not require an ArgoCD version upgrade to ship a fix or new feature.
 - **In-cluster deployment** — The ITSM server is on-premises. All middleware must run
   inside the EKS cluster and communicate with the ITSM API over a secured network boundary
   (VPN / Direct Connect).
 - **Minimal footprint** — Avoid adding sidecars to `argocd-server` or modifying the ArgoCD
-  image. Prefer configuration-driven approaches.
+  image. Prefer configuration-driven approaches with the smallest possible set of new
+  components.
 - **Security** — ITSM credentials must never be exposed to the browser. mTLS must be
   enforced on the cross-boundary call to the on-prem ITSM API.
 - **Auditability** — Every validation event (approved or rejected) must be durably logged
@@ -64,7 +134,7 @@ disrupting the existing ArgoCD release cycle or requiring a custom ArgoCD build?
 
 ### Option A — Lua Custom Action + `registerResourceExtension` React Tab *(Selected)*
 
-A two-part in-cluster mechanism using ArgoCD's native extension APIs with a hard backstop:
+A two-part in-cluster mechanism using ArgoCD's native extension APIs:
 
 1. A **Lua custom action** (`restart (RFC required)`) defined in `argocd-cm` appears in
    the three-dot action menu on every Deployment resource. When clicked it writes a
@@ -114,9 +184,9 @@ read-only observation.
   only a ConfigMap update and an `argocd-server` rolling restart — no ArgoCD upgrade needed.
 - The Lua action script in `argocd-cm` is version-controlled, diff-able, and deployable
   via standard GitOps. Changes take effect after a ConfigMap update and pod restart.
-- `registerResourceExtension` places the RFC form exactly where the engineer is already
-  working — inside the Deployment detail panel — with no context switch to a separate tab
-  or external tool.
+- `registerResourceExtension` places the RFC form exactly where the developer is already
+  working — inside the Deployment detail panel — eliminating the jumphost dependency and
+  any context switch to a separate tool or terminal session.
 - The RFC middleware is a plain HTTP service with its own `Deployment` and release pipeline,
   fully decoupled from ArgoCD's lifecycle.
 - mTLS between the middleware and the ITSM API ensures credentials are never exposed to the
@@ -137,9 +207,11 @@ read-only observation.
   across ArgoCD upgrades.
 - An `argocd-server` rolling restart is required to pick up changes to `extension.js` or
   `argocd-cm`. This causes a brief UI disruption (seconds) for active users.
-- The two-part mechanism (Lua action → annotation → React tab) is indirect. Engineers must
+- The two-part mechanism (Lua action → annotation → React tab) is indirect. Developers must
   understand that clicking the action opens no modal; they must navigate to the "RFC
-  Validation" tab manually.
+  Validation" tab manually. Onboarding documentation is required.
+- Adds one new operational component: the RFC middleware Deployment, which requires
+  monitoring, alerting, patching, and an on-call runbook.
 
 ---
 
@@ -158,10 +230,8 @@ read-only observation.
   an external approval before proceeding.
 - Requires a custom webhook receiver service and significant glue code to correlate
   notification events back to ArgoCD resource actions.
-- No UI feedback in ArgoCD — the engineer has no in-context signal that validation is in
-  progress or has failed.
-- Does not solve the `kubectl` bypass problem. The admission webhook would still be needed,
-  making this option additive rather than a standalone solution.
+- No UI feedback in ArgoCD — the developer has no in-context signal that validation is in
+  progress or has failed, defeating the DX improvement goal.
 - High latency: notification → external service → ITSM API → response → ArgoCD API is a
   multi-hop async flow with no guaranteed completion time.
 
@@ -251,7 +321,7 @@ read-only observation.
 
 ## 5. Decision Outcome
 
-**Selected option: Option A — Lua Custom Action + `registerResourceExtension` React Tab
+**Selected option: Option A — Lua Custom Action + `registerResourceExtension` React Tab**
 
 ### 5.1 Rationale
 
@@ -260,62 +330,70 @@ Option A is the only approach that satisfies all decision drivers simultaneously
 - It uses ArgoCD's officially supported extension APIs, preserving upgrade independence and
   avoiding a custom build.
 - The RFC validation form is surfaced inline in the ArgoCD resource detail panel — exactly
-  where the engineer is already working — meeting the operational velocity requirement
-  without external tool context-switching.
+  where the developer already is when they diagnose a pod issue — meeting the DX goal of
+  eliminating the jumphost dependency without any context switch.
 - The RFC middleware is fully decoupled from ArgoCD's lifecycle. It can be updated,
-  scaled, and released independently.
+  scaled, and released independently via its own Docker image and rollout.
 - The proxy extension ensures ITSM credentials are never exposed to the browser — they
-  remain inside the cluster boundary.
-- Every component (Lua action, React bundle, RFC middleware) is independently
-  deployable via GitOps, with no ArgoCD upgrade required to ship changes.
+  remain inside the cluster boundary at all times.
+- Every component (Lua action, React bundle, RFC middleware) is independently deployable
+  via GitOps, with no ArgoCD upgrade required to ship changes.
 
 Options B and C were rejected primarily because they provide no UI-integrated feedback loop
-— engineers would receive no contextual guidance on RFC requirements within the ArgoCD
-interface. Option D was rejected due to the unsustainable maintenance burden of a custom
-ArgoCD fork. Option E was rejected because it inverts the operational model in a way that
-is incompatible with incident response requirements and requires a security boundary change.
+— developers would receive no contextual guidance on RFC requirements within the ArgoCD
+interface, which directly undermines the DX improvement goal. Option D was rejected due to
+the unsustainable maintenance burden of a custom ArgoCD fork. Option E was rejected because
+it inverts the operational model in a way that is incompatible with incident response
+requirements and requires a security boundary change.
 
 ### 5.2 Consequences
 
 #### Positive
 
-- **Compliance enforced automatically** — pod restarts in labelled production namespaces
-  cannot proceed without a valid, approved RFC, regardless of how the restart is initiated.
+- **Jumphost dependency eliminated** — developers can restart pods directly from the ArgoCD
+  UI with no SSH session, VPN tunnel, or `kubectl` knowledge required. The time from
+  decision to action drops from 15–30 minutes to under 60 seconds.
+- **RFC validation inline** — the RFC input and approval status are surfaced inside the
+  same Deployment detail panel where the developer is already working. No context switch,
+  no separate tool, no separate browser tab.
+- **Compliance enforced automatically** — pod restarts cannot proceed through the UI without
+  a valid, approved RFC, closing the current audit gap for UI-initiated restarts.
 - **Full audit trail** — every validation event is structured-logged (RFC ID, user,
-  deployment, namespace, result, timestamp) and shipped to CloudWatch, satisfying audit and
-  compliance reporting requirements without manual correlation.
+  deployment, namespace, result, timestamp) and shipped to CloudWatch, enabling compliance
+  reporting without manual correlation across systems.
 - **ArgoCD upgrade independence** — the extension has its own release pipeline. A new
   extension version requires only a ConfigMap update and `argocd-server` rolling restart,
-  not an ArgoCD upgrade.
+  not an ArgoCD version upgrade.
 - **Credential security** — ITSM API credentials (mTLS cert + API key) are stored in
   Kubernetes Secrets (or AWS Secrets Manager via ESO) and never exposed to the browser or
   included in logs.
 - **RBAC-aligned** — access to the `restart (RFC required)` action is controlled via
   `argocd-rbac-cm`, consistent with how all other ArgoCD permissions are managed.
-- **Break-glass available** — a documented emergency bypass mechanism exists for P0
-  incidents, with mandatory automated alerting and post-incident review requirements.
+- **Minimal new components** — only one net-new runtime component is introduced: the RFC
+  middleware Deployment. Everything else is configuration (argocd-cm, ConfigMap bundle).
 
 #### Negative
 
-- **Operational surface area increases** — three new components are added to the platform:
-  RFC middleware Deployment. It requires monitoring, alerting, patching, and on-call runbooks.
 - **`argocd-server` restart required for extension updates** — any change to `extension.js`
   or `argocd-cm` (Lua action, proxy config) requires a rolling restart of `argocd-server`,
   causing a brief UI disruption for active users.
 - **Built-in restart action must be explicitly re-declared** — defining
   `resource.customizations.actions.apps_Deployment` in `argocd-cm` removes the built-in
   restart action unless it is re-declared in the same block. A misconfigured `argocd-cm`
-  patch could silently remove the standard restart option for all engineers.
+  patch could silently remove the standard restart option for all developers.
 - **Proxy extension is alpha** — the `--enable-proxy-extension` flag is an alpha feature
   in ArgoCD v2.7. It must be monitored across ArgoCD upgrades for breaking changes or
   graduation to stable.
 - **Indirect UX flow** — the two-part mechanism (click action → annotation written →
-  navigate to RFC Validation tab) is less intuitive than a native modal. Engineers require
-  onboarding documentation and may initially find the flow confusing.
+  navigate to RFC Validation tab) is less intuitive than a native blocking modal. Developers
+  require onboarding documentation and may initially find the two-step flow confusing.
 - **VPN / Direct Connect dependency** — the RFC middleware's connection to the on-prem ITSM
   API introduces a network dependency. If the VPN or Direct Connect link is degraded, ITSM
-  validation will fail. The middleware fails closed (does not fail open), which could block
-  legitimate restarts during a network outage without a break-glass procedure.
+  validation will fail and the restart will be blocked. A break-glass procedure must exist
+  for incident response scenarios where the ITSM API is unreachable.
+- **RFC middleware is a new operational dependency** — the middleware Deployment requires
+  monitoring, alerting, patching, and an on-call runbook. An outage of the middleware
+  blocks all RFC-gated restarts from the UI.
 
 ---
 
@@ -329,6 +407,7 @@ is incompatible with incident response requirements and requires a security boun
 | Lua custom action | argocd-cm patch | argocd | Independent — ConfigMap update + pod restart |
 | Proxy extension config | argocd-cm patch | argocd | Independent — ConfigMap update + pod restart |
 | RFC middleware | Deployment + ClusterIP | argocd | Independent — own Docker image + rollout |
+| FluentBit audit shipper | DaemonSet | argocd | Independent — version pin in manifest |
 
 ### Key configuration constraints
 
@@ -336,15 +415,17 @@ is incompatible with incident response requirements and requires a security boun
 - `--enable-proxy-extension` must be set on `argocd-server`.
 - The built-in `restart` action must be explicitly re-declared in
   `resource.customizations.actions.apps_Deployment` alongside `restart (RFC required)`.
+- RFC middleware must only be reachable from `argocd-server` pods via `NetworkPolicy`
+  (ingress) and may only reach the on-prem ITSM CIDR range (egress).
 
 ### Open decisions
 
 | Decision | Options | Owner | Due |
 |---|---|---|---|
 | VPN vs Direct Connect for ITSM connectivity | Site-to-Site VPN · Direct Connect | Networking team | Before implementation |
-| `failurePolicy` per environment | `Fail` (strict) · `Ignore` (permissive) | SRE + Security | Before go-live |
 | ITSM scope matching granularity | Per-cluster · per-namespace · per-app label | Change Management | Before implementation |
 | ESO vs manual Secret for ITSM credentials | External Secrets Operator · manual `kubectl create secret` | Security team | Before implementation |
+| Middleware failure behaviour | Fail closed (block restart) · fail open with alert | SRE + Security | Before production go-live |
 
 ---
 
@@ -355,3 +436,4 @@ is incompatible with incident response requirements and requires a security boun
 - [ArgoCD Resource Customizations — Custom Actions](https://argo-cd.readthedocs.io/en/stable/operator-manual/resource_actions/)
 - [argocd-extension-installer](https://github.com/argoproj-labs/argocd-extension-installer)
 - [ServiceNow Change Management REST API](https://developer.servicenow.com/dev.do#!/reference/api/tokyo/rest/change-management-api)
+- CLAUDE.md — Full architecture guide for this project
