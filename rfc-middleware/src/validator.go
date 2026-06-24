@@ -17,7 +17,6 @@ type ValidationResult struct {
 }
 
 type Validator struct {
-	cache  *Cache
 	itsm   *ITSMClient
 	logger *slog.Logger
 }
@@ -27,22 +26,13 @@ func (v *Validator) Validate(ctx context.Context, rfcID, namespace string) (*Val
 		return &ValidationResult{Approved: false, Reason: "rfc_id is required"}, nil
 	}
 
-	cacheKey := fmt.Sprintf("rfc:%s:%s", rfcID, namespace)
-
-	if cached, ok := v.cache.Get(ctx, cacheKey); ok {
-		v.logger.Debug("cache hit", "key", cacheKey)
-		return cached, nil
-	}
-
 	record, err := v.itsm.FetchChangeRecord(ctx, rfcID)
 	if err != nil {
 		v.logger.Error("itsm fetch failed", "rfc_id", rfcID, "err", err)
 		return &ValidationResult{Approved: false, Reason: "itsm_unreachable"}, nil
 	}
 
-	result := v.evaluate(record, namespace)
-	v.cache.Set(ctx, cacheKey, result)
-	return result, nil
+	return v.evaluate(record, namespace), nil
 }
 
 func (v *Validator) evaluate(r *ChangeRecord, namespace string) *ValidationResult {

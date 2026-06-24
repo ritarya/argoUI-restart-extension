@@ -15,12 +15,6 @@ func main() {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
-	cache, err := newCache(os.Getenv("REDIS_ADDR"), ttlSeconds())
-	if err != nil {
-		logger.Error("failed to connect to Redis", "err", err)
-		os.Exit(1)
-	}
-
 	client, err := newITSMClient(
 		os.Getenv("ITSM_BASE_URL"),
 		os.Getenv("ITSM_TOKEN_URL"),
@@ -35,7 +29,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	validator := &Validator{cache: cache, itsm: client, logger: logger}
+	validator := &Validator{itsm: client, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/validate", func(w http.ResponseWriter, r *http.Request) {
@@ -84,10 +78,6 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if err := cache.Ping(r.Context()); err != nil {
-			http.Error(w, "redis unavailable", http.StatusServiceUnavailable)
-			return
-		}
 		w.WriteHeader(http.StatusOK)
 	})
 
